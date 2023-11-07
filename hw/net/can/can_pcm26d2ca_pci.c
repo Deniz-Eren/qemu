@@ -36,7 +36,6 @@
 #include "hw/pci/pci_device.h"
 #include "hw/qdev-properties.h"
 #include "hw/pci/msi.h"
-#include "hw/pci/msix.h"
 #include "migration/vmstate.h"
 #include "net/can_emu.h"
 
@@ -64,15 +63,8 @@ DECLARE_INSTANCE_CHECKER(Pcm26D2CAPCIeState, PCM26D2CA_PCI_DEV,
 #define PCM26D2CA_PCI_BYTES_PER_SJA 0x80
 
 #define PCM26D2CA_IO_IDX            0
-#define PCM26D2CA_MSIX_IDX          1
-
-#define PCM26D2CA_MSIX_SIZE         (16 * KiB)
-
-#define PCM26D2CA_MSIX_TABLE        (0x0000)
-#define PCM26D2CA_MSIX_PBA          (0x2000)
 
 #define PCM26D2CA_MSI_VEC_NUM       (8)
-#define PCM26D2CA_MSIX_VEC_NUM      PCM26D2CA_MSI_VEC_NUM
 #define PCM26D2CA_MSI_RI_ENTRY      (0) /* Receive interrupt */
 #define PCM26D2CA_MSI_TI_ENTRY      (1) /* Transmit interrupt */
 #define PCM26D2CA_MSI_EI_ENTRY      (2) /* Error warning interrupt */
@@ -87,7 +79,6 @@ struct Pcm26D2CAPCIeState {
     PCIDevice       dev;
     /*< public >*/
     MemoryRegion    io;
-    MemoryRegion    msix;
 
     CanSJA1000State sja_state[PCM26D2CA_PCI_SJA_COUNT];
     qemu_irq        irq;
@@ -104,8 +95,6 @@ static void pcm26d2ca_pci_reset(DeviceState *dev)
     for (i = 0 ; i < PCM26D2CA_PCI_SJA_COUNT; i++) {
         can_sja_hardware_reset(&d->sja_state[i]);
     }
-
-    msix_reset(&d->dev);
 }
 
 static uint64_t pcm26d2ca_pci_io_read(void *opaque, hwaddr addr, unsigned size)
@@ -154,53 +143,6 @@ static const MemoryRegionOps pcm26d2ca_pci_io_ops = {
     },
 };
 
-static void
-pcm26d2ca_unuse_msix_vectors(Pcm26D2CAPCIeState *s, int num_vectors)
-{
-    int i;
-    for (i = 0; i < num_vectors; i++) {
-        msix_vector_unuse(PCI_DEVICE(s), i);
-    }
-}
-
-static void
-pcm26d2ca_use_msix_vectors(Pcm26D2CAPCIeState *s, int num_vectors)
-{
-    int i;
-    for (i = 0; i < num_vectors; i++) {
-        msix_vector_use(PCI_DEVICE(s), i);
-    }
-}
-
-static void
-pcm26d2ca_init_msix(Pcm26D2CAPCIeState *s)
-{
-    Error *err = NULL;
-
-    int res = msix_init(PCI_DEVICE(s), PCM26D2CA_MSIX_VEC_NUM,
-                        &s->msix,
-                        PCM26D2CA_MSIX_IDX, PCM26D2CA_MSIX_TABLE,
-                        &s->msix,
-                        PCM26D2CA_MSIX_IDX, PCM26D2CA_MSIX_PBA,
-                        0xA0, &err);
-
-    if (res < 0) {
-        error_setg(&err, "pcm26d2ca_init_msix failed");
-        return;
-    } else {
-        pcm26d2ca_use_msix_vectors(s, PCM26D2CA_MSIX_VEC_NUM);
-    }
-}
-
-static void
-pcm26d2ca_cleanup_msix(Pcm26D2CAPCIeState *s)
-{
-    if (msix_present(PCI_DEVICE(s))) {
-        pcm26d2ca_unuse_msix_vectors(s, PCM26D2CA_MSIX_VEC_NUM);
-        msix_uninit(PCI_DEVICE(s), &s->msix, &s->msix);
-    }
-}
-
 static void pcm26d2ca_pci_realize(PCIDevice *pci_dev, Error **errp)
 {
     static const uint16_t pcie_offset = 0x0E0;
@@ -243,13 +185,6 @@ static void pcm26d2ca_pci_realize(PCIDevice *pci_dev, Error **errp)
     pci_register_bar(&d->dev, PCM26D2CA_IO_IDX,
                      PCI_BASE_ADDRESS_SPACE_MEMORY, &d->io);
 
-    memory_region_init(&d->msix, OBJECT(d), "pcm26d2ca_pci-msix",
-                       PCM26D2CA_MSIX_SIZE);
-    pci_register_bar(&d->dev, PCM26D2CA_MSIX_IDX,
-                     PCI_BASE_ADDRESS_SPACE_MEMORY, &d->msix);
-
-    pcm26d2ca_init_msix(d);
-
     if (pcie_endpoint_cap_v1_init(pci_dev, pcie_offset) < 0) {
         error_setg(errp, "Failed to initialize PCIe capability");
         return;
@@ -276,7 +211,6 @@ static void pcm26d2ca_pci_exit(PCIDevice *pci_dev)
     }
 
     qemu_free_irq(d->irq);
-    pcm26d2ca_cleanup_msix(d);
     msi_uninit(pci_dev);
 }
 
